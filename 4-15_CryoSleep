@@ -1,0 +1,300 @@
+/*===============================================================================================================================
+//  Author      : Jasmine Euell, Tyler Toma, Thomas Ramey
+//  Project     : Arduino Uno PWM for peltier
+//  Description : XY160D & Arduino to control peltier, with TMP36 analog temperature sensor with Arduino example code.
+                : Adjusted for 10K THermistor 3/29
+                : Adjusted for PWM Fan
+//  Source Code : https://github.com/gramaziokohler/clamp_electronics/blob/master/doc/motor_driver/XY160D_7A_160W_MotorDriver.pdf 
+//  Source Code : https://ali-atwa.medium.com/how-to-use-a-peltier-with-arduino-a35b0d4e52c2
+//  Source Code : https://www.makerguides.com 
+//  Source Code : https://create.arduino.cc/projecthub/Marcazzan_M/how-easy-is-it-to-use-a-thermistor-e39321
+//  Source Code : https://create.arduino.cc/projecthub/tylerpeppy/25-khz-4-pin-pwm-fan-control-with-arduino-uno-3005a1
+//  Program: Control Peltier via Arduino
+//===============================================================================================================================*/
+// Used a .1uF and a 330ohm for stability
+// Constants defined to which pin of the Arduino the output of the TMP36 is connected:
+#include <LiquidCrystal.h>
+// #define sensorPin A0
+
+// Thermistor
+// These values are in the datasheet T0:25 C
+#define RT0 10000             // Ω
+#define B 3977                // K +- 0.75% // old 3977
+
+#define VCC 5                 //Supply voltage
+#define R 10000               //R=10KΩ
+
+int T = 65;                        // desired temperature
+int time_start;
+int loop_time;
+
+const int Plus = 13;           // # for plus push pin
+const int Minus = 7;          // #for minus push pin
+
+/*/LED
+const int LEDCool = 11;       // LED cooling rep
+const int LEDHeat = 9;        // LED heating rep
+const int LEDNeutral = 10;    // LED neutral rep
+*/
+const int IN1 = 8;            // 10 place
+//const int IN2 = 7;          // 01 place
+const int ENA = 6;            // PWM
+
+/* FAN */
+const byte OC1A_PIN = 10;
+//const byte OC1B_PIN = 5;
+
+const word PWM_FREQ_HZ = 25000; //Adjust this value to adjust the frequency (Frequency in HZ!) (Set currently to 25kHZ)
+const word TCNT1_TOP = 16000000/(2*PWM_FREQ_HZ);
+
+
+/* LCD SCREEN */ 
+// initializations
+const int rs = 12;                  // LCD RS pin to digital pin 12
+const int en = 11;                  // LCD Enable pin to digital pin 11
+const int d4 = 5;                   // LCD D4 pin to digital pin 5
+const int d5 = 4;                   // LCD D5 pin to digital pin 4
+const int d6 = 3;                   // LCD D6 pin to digital pin 3
+const int d7 = 2;                   // LCD D7 pin to digital pin 2
+
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+
+// changeable variables
+int PlusState = 0;            // reads plus push button
+int MinusState = 0;           // reads minus push button
+
+//Variables
+float RT, VR, ln, TX, TF, T0, VRT, V_Pot, PWM_Val;
+
+void setup() {
+  // Begin serial communication at a baud rate of 9600:
+  Serial.begin(9600);
+  
+  //Adjust this for the same used to be 25 + 273.15
+  T0 = 25 + 272.00;           // Temperature T0 from datasheet, conversion C to K
+  
+
+  /*/ initializing LED outputs
+  pinMode(LEDCool, OUTPUT);
+  pinMode(LEDHeat, OUTPUT);
+  pinMode(LEDNeutral, OUTPUT);
+  pinMode(ENA, OUTPUT);*/
+
+  // initializing pushbutton inputs
+  pinMode(Plus, INPUT);
+  pinMode(Minus, INPUT);
+
+  // initializing Fan 
+  
+  pinMode(OC1A_PIN, OUTPUT);
+  // Clear Timer1 control and count registers
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1  = 0;
+
+  // initialize Potentiometer
+  pinMode(A5, OUTPUT);
+
+  // Set Timer1 configuration
+  // COM1A(1:0) = 0b10   (Output A clear rising/set falling)
+  // COM1B(1:0) = 0b00   (Output B normal operation)
+  // WGM(13:10) = 0b1010 (Phase correct PWM)
+  // ICNC1      = 0b0    (Input capture noise canceler disabled)
+  // ICES1      = 0b0    (Input capture edge select disabled)
+  // CS(12:10)  = 0b001  (Input clock select = clock/1)
+  
+  TCCR1A |= (1 << COM1A1) | (1 << WGM11);
+  TCCR1B |= (1 << WGM13) | (1 << CS10);
+  ICR1 = TCNT1_TOP;
+  
+}
+
+///* Controls the Peltier */
+void Peltier_Cooling(int Cool) 
+{
+  /*/LED - Blue
+  digitalWrite(LEDHeat, LOW);       
+  digitalWrite(LEDCool, HIGH);      // temp is too high need cool
+  digitalWrite(LEDNeutral, LOW);*/
+  // Peltier
+  digitalWrite(IN1,HIGH); 
+  //digitalWrite(IN2,LOW); 
+  analogWrite(ENA,Cool);
+  Serial.print(" COOLING ");
+  PWM_Val = float(Cool)/255;
+}
+
+void Peltier_Neutral(int Neutral) 
+{
+  /* LED - Green
+  digitalWrite(LEDHeat, LOW);
+  digitalWrite(LEDCool, LOW);
+  digitalWrite(LEDNeutral, HIGH);   // temp is fine*/
+  // Peltier
+  digitalWrite(IN1,LOW); 
+  //digitalWrite(IN2,HIGH); 
+  analogWrite(ENA,Neutral);
+  Serial.print(" NEUTRAL ");
+  PWM_Val = float(Neutral)/255;
+  
+}
+
+void Peltier_StandBy()
+{
+  /*/LED - Red
+  digitalWrite(LEDHeat, HIGH);      // temp is too low need heat/ turn off
+  digitalWrite(LEDCool, LOW); 
+  digitalWrite(LEDNeutral, LOW);*/
+  //Peltier
+  digitalWrite(IN1,LOW); 
+  //digitalWrite(IN2,LOW);
+  Serial.print(" STANDBY ");
+  PWM_Val = 0;
+}
+
+//void Peltier_Mode(int PWM, int sensorTemp, int desiredTemp)
+//{
+//  if (sensorTemp-desiredTemp < 0)
+//  {
+//      //digitalWrite(IN2,HIGH); 
+//      analogWrite(ENA,Neutral);
+//      Serial.print(" Cooling  ");
+//  }
+//  else if (sensorTemp-desiredTemp > 0)
+//  {
+//    digitalWrite(IN1,LOW); 
+////  digitalWrite(IN2,LOW);
+//    Serial.print(" STANDBY ");
+//  }
+//
+//  else
+//  {
+//    
+//  }
+//}
+
+///* Controls the FAN */
+//void setPwmDuty(byte duty) 
+//{
+//  OCR1A = (word) (duty*TCNT1_TOP)/100;
+//}
+
+// GENERAL LOOP
+void loop() 
+{
+  // Begin timer
+  time_start = millis();
+  
+  /*SENSOR-COUPLER
+  // Get a reading from the temperature sensor:
+  int reading = analogRead(sensorPin);
+
+  // Convert the reading into voltage:
+  float voltage = reading * (5000 / 1024.0);
+
+  // Convert the voltage into the temperature in Celsius:
+  float temperature = (voltage - 500) / 10;
+  //Convert temperature to Fahrenheit:
+  float t_in = round((1.8 * temperature) + 32);
+  float t_no_r = (1.8 * temperature) + 32;
+  */
+
+  //THERMISTOR
+  VRT = analogRead(A1);              //Acquisition analog value of VRT
+  VRT = (5.00 / 1023.00) * VRT;      //Conversion to voltage
+  VR = VCC - VRT;
+  RT = VRT / (VR / R);               //Resistance of RT
+
+  ln = log(RT / RT0);
+  TX = (1 / ((ln / B) + (1 / T0))); //Temperature from thermistor in K
+
+  TX = TX - 273.15;                 //Conversion to Celsius
+  TF = (TX * 1.8) + 32;             //Conversion to Fahrenheit
+  float temp = round(TF);           // Round temp for comparisson
+  
+  // desired temp (pushbuttons)
+  PlusState = digitalRead(Plus);       // plus state change
+  MinusState = digitalRead(Minus);     // minus state change
+
+  //Read Potentiometer Voltage
+  V_Pot = analogRead(A5);
+  
+  // check if pushbutton is pressed
+  if ( MinusState == LOW && PlusState == LOW){
+    T = T;                             // Temp doesn't change
+  }
+  else if (MinusState == HIGH && PlusState == LOW)
+  {
+    --T;                               // decrease temp
+  }
+  else if (MinusState == LOW && PlusState == HIGH)
+  {
+    ++T;                               // increase temp
+  }
+  
+  // led outputs * Peltier Controller
+  if ( T > temp)
+  {
+    Peltier_StandBy();                // temp is too low need heat/ turn off 0 out of 255
+//    setPwmDuty(75);                   // turn fan on medium
+    
+  }
+   else if ( T < temp)                        
+  {
+    Peltier_Cooling(153);             // temp is too high need cool 60%
+                                      // 70-179, 60-153, 50-128, 40-102, 30-77, 20-51, 10-26
+//    setPwmDuty(100);                  // turn fan on high out of 100
+  }
+  else if ( T == temp)                     
+  {
+    Peltier_Neutral(100);             // temp is fine 40%
+//    setPwmDuty(75);                   // turn fan on low  
+  }
+
+  // Print the temperature in the Serial Monitor:
+  Serial.print("Temperature \t Desired: ");
+  Serial.print( T);
+  Serial.print(" \xC2\xB0"); 
+  Serial.print("F");
+  Serial.print("\t\t");
+  Serial.print("Pillow: ");
+  Serial.print(TF);
+  Serial.print(" \xC2\xB0"); // shows degree symbol
+  Serial.print("F"); 
+  Serial.print("\t");  
+  Serial.print("PWM: ");
+  Serial.print(PWM_Val);
+  Serial.println("\t\t");
+
+
+  //Old Code for Thermocouple
+  //Serial.println("T_Couple: ");
+  //Serial.print(t_in);
+  //Serial.print(" \xC2\xB0"); // shows degree symbol
+  //Serial.println("F"); 
+
+  //Print to LCD 
+  // set up the LCD's number of columns and rows:
+  lcd.begin(16, 2);
+  lcd.print("T: ");
+  lcd.print(T);
+  lcd.print("F");
+  lcd.print("  PWM: ");
+  lcd.print(int(PWM_Val*100));
+  lcd.print("%");
+  
+ 
+
+  // second row of characters
+  lcd.setCursor(0,1);
+  lcd.print("Pillow T: ");
+  lcd.print(TF); //Switch to TF
+  lcd.print("F");
+  lcd.print(" \xC2\xB0");
+
+  // Timer end
+  loop_time = millis() - time_start;
+
+  delay(500 - loop_time); // wait a second between readings
+}
